@@ -1,0 +1,16 @@
+# Node
+node_modules/
+
+# Local data (данные вне репо)
+cars.json
+assets/
+*.lock
+.env
+
+# IDE/OS
+.vscode/
+.idea/
+.DS_Store
+
+# Frontend отдельным репо
+site/
