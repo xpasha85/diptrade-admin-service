@@ -2,17 +2,22 @@ import fs from 'fs/promises';
 import path from 'path';
 import sharp from 'sharp';
 
+function carsDataDir(dataRoot) {
+  // cars.json lives under DATA_ROOT/data/
+  return path.resolve(dataRoot, 'data');
+}
+
 function carsJsonPath(dataRoot) {
-  return path.resolve(dataRoot, 'cars.json');
+  return path.resolve(carsDataDir(dataRoot), 'cars.json');
 }
 function carsTmpPath(dataRoot) {
-  return path.resolve(dataRoot, 'cars.json.tmp');
+  return path.resolve(carsDataDir(dataRoot), 'cars.json.tmp');
 }
 function carsSwapPath(dataRoot) {
-  return path.resolve(dataRoot, 'cars.json.swap');
+  return path.resolve(carsDataDir(dataRoot), 'cars.json.swap');
 }
 function carsLockPath(dataRoot) {
-  return path.resolve(dataRoot, 'cars.lock');
+  return path.resolve(carsDataDir(dataRoot), 'cars.lock');
 }
 function assetsCarsDir(dataRoot) {
   return path.resolve(dataRoot, 'assets', 'cars');
@@ -62,12 +67,20 @@ function parseCarsJson(raw) {
 }
 
 async function listBackups(dataRoot) {
-  const entries = await fs.readdir(dataRoot, { withFileTypes: true });
+  const dir = carsDataDir(dataRoot);
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return [];
+    throw err;
+  }
+
   const items = [];
   for (const e of entries) {
     if (!e.isFile()) continue;
     if (!e.name.startsWith('cars.json.bak.')) continue;
-    const full = path.resolve(dataRoot, e.name);
+    const full = path.resolve(dir, e.name);
     try {
       const st = await fs.stat(full);
       items.push({ path: full, mtimeMs: st.mtimeMs });
@@ -85,6 +98,9 @@ async function pruneBackups(env) {
 }
 
 async function acquireWriteLock(env) {
+  // Ensure DATA_ROOT/data exists because lock lives next to cars.json
+  await fs.mkdir(carsDataDir(env.DATA_ROOT), { recursive: true });
+
   const lockPath = carsLockPath(env.DATA_ROOT);
 
   const tryCreate = async () => {
@@ -164,13 +180,16 @@ async function backupCurrent(env) {
   const st = await fs.stat(finalPath);
   if (st.size === 0) return;
 
-  const backupPath = path.resolve(env.DATA_ROOT, backupFileName());
+  const backupPath = path.resolve(carsDataDir(env.DATA_ROOT), backupFileName());
   await fs.copyFile(finalPath, backupPath);
   await pruneBackups(env);
 }
 
 async function writeCarsAtomically(env, carsArray) {
   if (!Array.isArray(carsArray)) throw makeErr(500, 'CARS_JSON_WRONG_SHAPE', 'cars.json must be an array of cars');
+
+  // Ensure DATA_ROOT/data exists before writing tmp/final files
+  await fs.mkdir(carsDataDir(env.DATA_ROOT), { recursive: true });
 
   const finalPath = carsJsonPath(env.DATA_ROOT);
   const tmpPath = carsTmpPath(env.DATA_ROOT);
@@ -243,77 +262,8 @@ async function readCarsNoLock(env) {
     throw makeErr(500, 'CARS_JSON_READ_FAILED', `Failed to read cars.json: ${err?.message || String(err)}`);
   }
 
-  return parseCarsJson(raw) ?? [];
-}
-
-export async function readCars(env) {
-  const filePath = carsJsonPath(env.DATA_ROOT);
-
-  try {
-    await ensureConsistency(env);
-  } catch (err) {
-    throw makeErr(500, 'CARS_STORE_CONSISTENCY_FAILED', `Failed to ensure consistency: ${err?.message || String(err)}`);
-  }
-
-  let raw;
-  try {
-    raw = await fs.readFile(filePath, 'utf-8');
-  } catch (err) {
-    if (err && err.code === 'ENOENT') {
-      await withWriteLock(env, async () => {
-        await initIfMissingOrEmpty(env);
-      });
-      return [];
-    }
-    throw makeErr(500, 'CARS_JSON_READ_FAILED', `Failed to read cars.json: ${err?.message || String(err)}`);
-  }
-
-  try {
-    const data = parseCarsJson(raw);
-    if (Array.isArray(data) && raw.trim().length === 0) {
-      await withWriteLock(env, async () => {
-        await initIfMissingOrEmpty(env);
-      });
-    }
-    return data ?? [];
-  } catch (err) {
-    if (err?.code === 'CARS_JSON_INVALID') {
-      await withWriteLock(env, async () => {
-        const restored = await restoreFromLatestBackup(env);
-        if (!restored) await writeCarsAtomically(env, []);
-      });
-
-      const fixedRaw = await fs.readFile(filePath, 'utf-8');
-      const fixedData = parseCarsJson(fixedRaw);
-      return fixedData ?? [];
-    }
-
-    if (err?.status && err?.code) throw err;
-    throw makeErr(500, 'CARS_STORE_READ_FAILED', `Failed to parse/read store: ${err?.message || String(err)}`);
-  }
-}
-
-export async function readCarById(env, id) {
-  const cars = await readCars(env);
-  const numericId = Number(id);
-  if (!Number.isFinite(numericId)) throw makeErr(400, 'INVALID_ID', 'Invalid id');
-  return cars.find(c => Number(c?.id) === numericId) || null;
-}
-
-/* ===========================
-   Stage D: CRUD (no photos)
-   =========================== */
-
-function slugPart(value) {
-  const s = String(value ?? '')
-    .toLowerCase()
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[\s-]+/g, '_')
-    .replace(/[^a-z0-9_]/g, '')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  return s.length ? s : 'x';
+  const cars = parseCarsJson(raw);
+  return cars || [];
 }
 
 function validateRequiredCreate(payload) {
@@ -323,142 +273,207 @@ function validateRequiredCreate(payload) {
   const model = payload?.model;
   const year = payload?.year;
   const price = payload?.price;
-  const country_code = payload?.country_code;
+  const country = payload?.country;
 
   if (typeof brand !== 'string' || brand.trim().length === 0) errors.push('brand is required');
   if (typeof model !== 'string' || model.trim().length === 0) errors.push('model is required');
 
   const y = Number(year);
   const currentYear = new Date().getFullYear();
-  if (!Number.isFinite(y) || y < 1900 || y > currentYear + 1) errors.push('year is required and must be a valid year');
+  if (!Number.isFinite(y) || y < 1900 || y > currentYear + 1) errors.push('year is invalid');
 
   const p = Number(price);
-  if (!Number.isFinite(p) || p < 0) errors.push('price is required and must be >= 0');
+  if (!Number.isFinite(p) || p < 0) errors.push('price is invalid');
 
-  const allowedCountries = new Set(['KR', 'CN', 'RU']);
-  if (typeof country_code !== 'string' || !allowedCountries.has(country_code)) errors.push('country_code must be one of KR|CN|RU');
+  if (typeof country !== 'string' || !['KR', 'CN', 'RU'].includes(country)) errors.push('country is invalid');
 
-  if (errors.length) throw makeErr(400, 'VALIDATION_ERROR', errors.join('; '));
-
-  return { brand: brand.trim(), model: model.trim(), year: y, price: p, country_code };
+  return errors;
 }
 
-function validatePatch(patch) {
-  if (patch == null || typeof patch !== 'object' || Array.isArray(patch)) {
-    throw makeErr(400, 'VALIDATION_ERROR', 'patch must be an object');
+function validateRequiredUpdate(payload) {
+  const errors = [];
+  if (payload == null || typeof payload !== 'object') return ['payload must be an object'];
+
+  if ('brand' in payload) {
+    if (typeof payload.brand !== 'string' || payload.brand.trim().length === 0) errors.push('brand is invalid');
   }
-  if ('id' in patch) throw makeErr(400, 'READONLY_FIELD', 'id is readonly');
-  if ('assets_folder' in patch) throw makeErr(400, 'READONLY_FIELD', 'assets_folder is readonly');
-  if ('photos' in patch) throw makeErr(400, 'READONLY_FIELD', 'photos is readonly (managed by stage E)');
+  if ('model' in payload) {
+    if (typeof payload.model !== 'string' || payload.model.trim().length === 0) errors.push('model is invalid');
+  }
+  if ('year' in payload) {
+    const y = Number(payload.year);
+    const currentYear = new Date().getFullYear();
+    if (!Number.isFinite(y) || y < 1900 || y > currentYear + 1) errors.push('year is invalid');
+  }
+  if ('price' in payload) {
+    const p = Number(payload.price);
+    if (!Number.isFinite(p) || p < 0) errors.push('price is invalid');
+  }
+  if ('country' in payload) {
+    if (typeof payload.country !== 'string' || !['KR', 'CN', 'RU'].includes(payload.country)) errors.push('country is invalid');
+  }
+
+  return errors;
+}
+
+function sanitizeSlugPart(s) {
+  return String(s || '')
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, '_')
+    .replace(/[^a-z0-9_]+/g, '')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function generateAssetsFolder(car) {
+  const id = car.id;
+  const brand = sanitizeSlugPart(car.brand);
+  const model = sanitizeSlugPart(car.model);
+  const year = String(car.year);
+  return `${id}_${brand}_${model}_${year}`;
 }
 
 function nextId(cars) {
-  let max = 0;
+  let maxId = 0;
   for (const c of cars) {
-    const n = Number(c?.id);
-    if (Number.isFinite(n) && n > max) max = n;
+    const id = Number(c?.id);
+    if (Number.isFinite(id) && id > maxId) maxId = id;
   }
-  return max + 1;
+  return maxId + 1;
 }
 
-async function ensureAssetsFolder(env, folder) {
-  const base = assetsCarsDir(env.DATA_ROOT);
-  await fs.mkdir(base, { recursive: true });
-  const full = path.resolve(base, folder);
-  await fs.mkdir(full, { recursive: true });
+function stripReadonly(patch) {
+  if (!patch || typeof patch !== 'object') return patch;
+  const out = { ...patch };
+  delete out.id;
+  delete out.assets_folder;
+  delete out.photos;
+  return out;
+}
+
+function ensureMainPhotoExistsOrThrow(env, car) {
+  const photos = Array.isArray(car?.photos) ? car.photos : [];
+  if (photos.length === 0) return;
+
+  const main = photos[0];
+  const assetsDir = assetsCarsDir(env.DATA_ROOT);
+  const full = path.resolve(assetsDir, car.assets_folder, main);
+
+  // path traversal guard
+  const base = path.resolve(assetsDir, car.assets_folder) + path.sep;
+  if (!full.startsWith(base)) {
+    throw makeErr(400, 'PHOTO_INVALID_NAME', 'Invalid photo name');
+  }
+
+  return fileExists(full).then(exists => {
+    if (!exists) throw makeErr(400, 'PHOTO_MAIN_MISSING', 'Main photo file does not exist');
+  });
+}
+
+/* ===========================
+   Public API used by routes
+   =========================== */
+
+export async function readCars(env) {
+  const cars = await readCarsNoLock(env);
+  return cars;
+}
+
+export async function readCarById(env, id) {
+  const cars = await readCarsNoLock(env);
+  const numId = Number(id);
+  return cars.find(c => Number(c?.id) === numId) || null;
 }
 
 export async function createCar(env, payload) {
-  const req = validateRequiredCreate(payload);
+  const errors = validateRequiredCreate(payload);
+  if (errors.length) throw makeErr(400, 'VALIDATION_FAILED', errors.join('; '));
 
-  return withWriteLock(env, async () => {
+  return await withWriteLock(env, async () => {
     const cars = await readCarsNoLock(env);
 
-    const id = nextId(cars);
-    const folder = `${id}_${slugPart(req.brand)}_${slugPart(req.model)}_${req.year}`;
+    const car = {
+      ...payload,
+      id: nextId(cars),
+      photos: []
+    };
 
-    const car = { ...payload };
+    car.assets_folder = generateAssetsFolder(car);
 
-    delete car.id;
-    delete car.assets_folder;
-    delete car.photos;
+    cars.push(car);
 
-    car.id = id;
-    car.assets_folder = folder;
-    car.photos = [];
-
-    car.brand = req.brand;
-    car.model = req.model;
-    car.year = req.year;
-    car.price = req.price;
-    car.country_code = req.country_code;
-
-    await ensureAssetsFolder(env, folder);
-
-    const updated = [...cars, car];
-    await writeCarsAtomically(env, updated);
-
+    await writeCarsAtomically(env, cars);
     return car;
   });
 }
 
 export async function updateCar(env, id, patch) {
-  const numericId = Number(id);
-  if (!Number.isFinite(numericId)) throw makeErr(400, 'INVALID_ID', 'Invalid id');
+  const errors = validateRequiredUpdate(patch);
+  if (errors.length) throw makeErr(400, 'VALIDATION_FAILED', errors.join('; '));
 
-  validatePatch(patch);
-
-  return withWriteLock(env, async () => {
+  return await withWriteLock(env, async () => {
     const cars = await readCarsNoLock(env);
-    const idx = cars.findIndex(c => Number(c?.id) === numericId);
-    if (idx === -1) throw makeErr(404, 'NOT_FOUND', 'Car not found');
+    const numId = Number(id);
+    const idx = cars.findIndex(c => Number(c?.id) === numId);
+    if (idx < 0) throw makeErr(404, 'NOT_FOUND', 'Car not found');
 
-    const existing = cars[idx];
-    const updatedCar = { ...existing, ...patch };
+    const current = cars[idx];
+    const cleanPatch = stripReadonly(patch);
 
-    updatedCar.id = existing.id;
-    updatedCar.assets_folder = existing.assets_folder;
-    updatedCar.photos = existing.photos;
+    const updated = { ...current, ...cleanPatch };
+    cars[idx] = updated;
 
-    const nextCars = cars.slice();
-    nextCars[idx] = updatedCar;
-
-    await writeCarsAtomically(env, nextCars);
-    return updatedCar;
+    await ensureMainPhotoExistsOrThrow(env, updated);
+    await writeCarsAtomically(env, cars);
+    return updated;
   });
 }
 
 export async function deleteCar(env, id) {
-  const numericId = Number(id);
-  if (!Number.isFinite(numericId)) throw makeErr(400, 'INVALID_ID', 'Invalid id');
-
-  return withWriteLock(env, async () => {
+  return await withWriteLock(env, async () => {
     const cars = await readCarsNoLock(env);
-    const before = cars.length;
-    const remaining = cars.filter(c => Number(c?.id) !== numericId);
-    if (remaining.length === before) throw makeErr(404, 'NOT_FOUND', 'Car not found');
+    const numId = Number(id);
+    const idx = cars.findIndex(c => Number(c?.id) === numId);
+    if (idx < 0) throw makeErr(404, 'NOT_FOUND', 'Car not found');
 
-    await writeCarsAtomically(env, remaining);
-    return { deleted: 1 };
+    const [deleted] = cars.splice(idx, 1);
+    await writeCarsAtomically(env, cars);
+
+    // best-effort: delete folder
+    const folder = deleted?.assets_folder;
+    if (folder) {
+      const dir = path.resolve(assetsCarsDir(env.DATA_ROOT), folder);
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    return { ok: true };
   });
 }
 
 export async function bulkDeleteCars(env, ids) {
-  if (!Array.isArray(ids) || ids.length === 0) throw makeErr(400, 'VALIDATION_ERROR', 'ids must be a non-empty array');
+  if (!Array.isArray(ids) || ids.length === 0) throw makeErr(400, 'VALIDATION_FAILED', 'ids must be a non-empty array');
 
-  const parsed = ids.map(Number);
-  if (parsed.some(n => !Number.isFinite(n))) throw makeErr(400, 'VALIDATION_ERROR', 'ids must be numbers');
-
-  const set = new Set(parsed);
-
-  return withWriteLock(env, async () => {
+  return await withWriteLock(env, async () => {
     const cars = await readCarsNoLock(env);
-    const before = cars.length;
-    const remaining = cars.filter(c => !set.has(Number(c?.id)));
-    const deleted = before - remaining.length;
 
-    await writeCarsAtomically(env, remaining);
-    return { deleted };
+    const set = new Set(ids.map(x => Number(x)).filter(Number.isFinite));
+    if (set.size === 0) throw makeErr(400, 'VALIDATION_FAILED', 'ids must contain valid numbers');
+
+    const toDelete = cars.filter(c => set.has(Number(c?.id)));
+    const remain = cars.filter(c => !set.has(Number(c?.id)));
+
+    await writeCarsAtomically(env, remain);
+
+    // best-effort: delete folders
+    for (const c of toDelete) {
+      const folder = c?.assets_folder;
+      if (!folder) continue;
+      const dir = path.resolve(assetsCarsDir(env.DATA_ROOT), folder);
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    return { ok: true, deleted: toDelete.length };
   });
 }
 
@@ -466,168 +481,122 @@ export async function bulkDeleteCars(env, ids) {
    Stage E: Photos
    =========================== */
 
-function isAllowedImageMime(mime) {
-  const allowed = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
-  return allowed.has(String(mime || '').toLowerCase());
+function ensureInsideDir(baseDir, filePath) {
+  const base = path.resolve(baseDir) + path.sep;
+  const full = path.resolve(filePath);
+  return full.startsWith(base);
 }
 
-function safePhotoName(name) {
-  // разрешаем только img_###.webp
-  if (!/^img_\d{3}\.webp$/.test(name)) return null;
-  return name;
+async function ensureCarAssetsDir(env, car) {
+  const dir = path.resolve(assetsCarsDir(env.DATA_ROOT), car.assets_folder);
+  await fs.mkdir(dir, { recursive: true });
+  return dir;
 }
 
-function nextPhotoIndex(photos) {
-  let max = 0;
-  for (const p of photos || []) {
-    const m = /^img_(\d{3})\.webp$/.exec(p);
-    if (!m) continue;
-    const n = Number(m[1]);
-    if (Number.isFinite(n) && n > max) max = n;
-  }
-  return max + 1;
-}
-
-async function saveWebp(buffer, outPath) {
-  // max 1280 по длинной стороне, без кропа
-  await sharp(buffer)
+async function toWebp(buffer) {
+  // 1280px по длинной стороне, webp, без EXIF
+  return sharp(buffer)
     .rotate()
     .resize({ width: 1280, height: 1280, fit: 'inside', withoutEnlargement: true })
     .webp({ quality: 82 })
-    .toFile(outPath);
+    .toBuffer();
+}
+
+function makePhotoName(index) {
+  const n = String(index).padStart(3, '0');
+  return `img_${n}.webp`;
 }
 
 export async function uploadCarPhotos(env, id, files) {
-  const numericId = Number(id);
-  if (!Number.isFinite(numericId)) throw makeErr(400, 'INVALID_ID', 'Invalid id');
+  if (!Array.isArray(files) || files.length === 0) throw makeErr(400, 'VALIDATION_FAILED', 'files must be a non-empty array');
 
-  if (!Array.isArray(files) || files.length === 0) {
-    throw makeErr(400, 'VALIDATION_ERROR', 'No files uploaded. Use multipart field "files"');
-  }
-
-  return withWriteLock(env, async () => {
+  return await withWriteLock(env, async () => {
     const cars = await readCarsNoLock(env);
-    const idx = cars.findIndex(c => Number(c?.id) === numericId);
-    if (idx === -1) throw makeErr(404, 'NOT_FOUND', 'Car not found');
+    const numId = Number(id);
+    const idx = cars.findIndex(c => Number(c?.id) === numId);
+    if (idx < 0) throw makeErr(404, 'NOT_FOUND', 'Car not found');
 
     const car = cars[idx];
-    const folder = car.assets_folder;
-
-    await ensureAssetsFolder(env, folder);
-
-    const dir = path.resolve(assetsCarsDir(env.DATA_ROOT), folder);
     const photos = Array.isArray(car.photos) ? [...car.photos] : [];
-    let counter = nextPhotoIndex(photos);
 
-    const created = [];
+    const dir = await ensureCarAssetsDir(env, car);
 
-    // сначала пишем файлы на диск, потом обновляем JSON
     for (const f of files) {
-      if (!isAllowedImageMime(f.mimetype)) {
-        throw makeErr(400, 'VALIDATION_ERROR', `Unsupported file type: ${f.mimetype}`);
-      }
-      if (!f.buffer || f.buffer.length === 0) {
-        throw makeErr(400, 'VALIDATION_ERROR', 'Empty file buffer');
-      }
+      const buf = await toWebp(f.buffer);
+      const name = makePhotoName(photos.length + 1);
+      const target = path.resolve(dir, name);
 
-      const name = `img_${String(counter).padStart(3, '0')}.webp`;
-      counter += 1;
+      if (!ensureInsideDir(dir, target)) throw makeErr(400, 'PHOTO_INVALID_NAME', 'Invalid photo name');
 
-      const outPath = path.resolve(dir, name);
-
-      try {
-        await saveWebp(f.buffer, outPath);
-      } catch (e) {
-        // откатить созданные ранее файлы (best-effort)
-        await Promise.allSettled(created.map(n => fs.unlink(path.resolve(dir, n))));
-        throw makeErr(500, 'PHOTO_PROCESSING_FAILED', `Failed to process image: ${e?.message || String(e)}`);
-      }
-
-      created.push(name);
+      await fs.writeFile(target, buf);
       photos.push(name);
     }
 
-    const updatedCar = { ...car, photos };
-    cars[idx] = updatedCar;
+    car.photos = photos;
+    cars[idx] = car;
 
+    await ensureMainPhotoExistsOrThrow(env, car);
     await writeCarsAtomically(env, cars);
-    return updatedCar;
+    return car;
   });
 }
 
 export async function reorderCarPhotos(env, id, photos) {
-  const numericId = Number(id);
-  if (!Number.isFinite(numericId)) throw makeErr(400, 'INVALID_ID', 'Invalid id');
+  if (!Array.isArray(photos)) throw makeErr(400, 'VALIDATION_FAILED', 'photos must be an array');
 
-  if (!Array.isArray(photos)) throw makeErr(400, 'VALIDATION_ERROR', 'photos must be an array');
-  if (photos.length === 0) throw makeErr(400, 'VALIDATION_ERROR', 'photos must be non-empty');
-
-  // валидация имён
-  const normalized = photos.map(p => safePhotoName(String(p || ''))).filter(Boolean);
-  if (normalized.length !== photos.length) throw makeErr(400, 'VALIDATION_ERROR', 'Invalid photo name in array');
-
-  // без дублей
-  const set = new Set(normalized);
-  if (set.size !== normalized.length) throw makeErr(400, 'VALIDATION_ERROR', 'photos contains duplicates');
-
-  return withWriteLock(env, async () => {
+  return await withWriteLock(env, async () => {
     const cars = await readCarsNoLock(env);
-    const idx = cars.findIndex(c => Number(c?.id) === numericId);
-    if (idx === -1) throw makeErr(404, 'NOT_FOUND', 'Car not found');
+    const numId = Number(id);
+    const idx = cars.findIndex(c => Number(c?.id) === numId);
+    if (idx < 0) throw makeErr(404, 'NOT_FOUND', 'Car not found');
 
     const car = cars[idx];
     const current = Array.isArray(car.photos) ? car.photos : [];
 
-    // проверяем, что reorder не пытается “придумать” новые фото
-    const currentSet = new Set(current);
-    for (const p of normalized) {
-      if (!currentSet.has(p)) {
-        throw makeErr(400, 'VALIDATION_ERROR', `Photo does not exist in car.photos: ${p}`);
-      }
+    // must be permutation of current
+    const a = [...current].sort();
+    const b = [...photos].sort();
+    if (a.length !== b.length) throw makeErr(400, 'VALIDATION_FAILED', 'photos must include all current photos');
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) throw makeErr(400, 'VALIDATION_FAILED', 'photos must include all current photos');
     }
 
-    // можно требовать полного соответствия (same length), чтобы не “терять” фото
-    if (normalized.length !== current.length) {
-      throw makeErr(400, 'VALIDATION_ERROR', 'photos must contain all existing photos exactly (same length)');
-    }
+    car.photos = photos;
+    cars[idx] = car;
 
-    const updatedCar = { ...car, photos: normalized };
-    cars[idx] = updatedCar;
-
+    await ensureMainPhotoExistsOrThrow(env, car);
     await writeCarsAtomically(env, cars);
-    return updatedCar;
+    return car;
   });
 }
 
 export async function deleteCarPhoto(env, id, name) {
-  const numericId = Number(id);
-  if (!Number.isFinite(numericId)) throw makeErr(400, 'INVALID_ID', 'Invalid id');
+  if (typeof name !== 'string' || name.trim().length === 0) throw makeErr(400, 'VALIDATION_FAILED', 'name is required');
 
-  const safeName = safePhotoName(String(name || ''));
-  if (!safeName) throw makeErr(400, 'VALIDATION_ERROR', 'Invalid photo name');
-
-  return withWriteLock(env, async () => {
+  return await withWriteLock(env, async () => {
     const cars = await readCarsNoLock(env);
-    const idx = cars.findIndex(c => Number(c?.id) === numericId);
-    if (idx === -1) throw makeErr(404, 'NOT_FOUND', 'Car not found');
+    const numId = Number(id);
+    const idx = cars.findIndex(c => Number(c?.id) === numId);
+    if (idx < 0) throw makeErr(404, 'NOT_FOUND', 'Car not found');
 
     const car = cars[idx];
-    const folder = car.assets_folder;
+    const current = Array.isArray(car.photos) ? [...car.photos] : [];
+    const pos = current.indexOf(name);
+    if (pos < 0) throw makeErr(404, 'NOT_FOUND', 'Photo not found');
 
-    const photos = Array.isArray(car.photos) ? [...car.photos] : [];
-    const pos = photos.indexOf(safeName);
-    if (pos === -1) throw makeErr(404, 'NOT_FOUND', 'Photo not found in car.photos');
+    const dir = path.resolve(assetsCarsDir(env.DATA_ROOT), car.assets_folder);
+    const full = path.resolve(dir, name);
 
-    // удаляем файл best-effort
-    const filePath = path.resolve(assetsCarsDir(env.DATA_ROOT), folder, safeName);
-    await fs.unlink(filePath).catch(() => {});
+    if (!ensureInsideDir(dir, full)) throw makeErr(400, 'PHOTO_INVALID_NAME', 'Invalid photo name');
 
-    photos.splice(pos, 1);
+    await fs.unlink(full).catch(() => {});
+    current.splice(pos, 1);
 
-    const updatedCar = { ...car, photos };
-    cars[idx] = updatedCar;
+    car.photos = current;
+    cars[idx] = car;
 
+    await ensureMainPhotoExistsOrThrow(env, car);
     await writeCarsAtomically(env, cars);
-    return updatedCar;
+    return car;
   });
 }
