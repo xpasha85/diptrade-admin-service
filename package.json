@@ -5,12 +5,16 @@
   "type": "module",
   "scripts": {
     "dev": "node src/index.js",
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "db:import": "node scripts/import-cars-json-to-sqlite.js",
+    "db:import:dry": "node scripts/import-cars-json-to-sqlite.js --dry-run",
+    "smoke:api:sqlite": "node scripts/smoke-api-sqlite.js",
+    "report:smoke:api:sqlite": "node scripts/smoke-api-sqlite-report.js"
   },
   "dependencies": {
+    "better-sqlite3": "^11.8.1",
     "express": "^4.19.2",
     "multer": "^2.0.2",
     "sharp": "^0.34.5"
   }
 }
-

@@ -12,16 +12,19 @@ import {
   reorderCarPhotos
 } from '../services/carsStore.js';
 import { loadEnv } from '../config/env.js';
+import { handleRouteError, sendError } from '../http/errors.js';
+import { requireAdminToken } from '../middleware/adminAuth.js';
 
 const router = Router();
 const env = loadEnv();
+const adminAuth = requireAdminToken(env.ADMIN_TOKEN);
 
-function handleErr(res, e) {
-  res.status(e.status || 500).json({
-    error: e.code || 'UNKNOWN_ERROR',
-    message: e.message || 'Unknown error'
-  });
-}
+router.use((req, res, next) => {
+  if (['POST', 'PATCH', 'DELETE'].includes(req.method)) {
+    return adminAuth(req, res, next);
+  }
+  return next();
+});
 
 // Multer: храним в памяти, дальше sharp -> webp -> диск
 const upload = multer({
@@ -37,7 +40,7 @@ router.get('/', async (req, res) => {
     const cars = await readCars(env);
     res.json({ cars });
   } catch (e) {
-    handleErr(res, e);
+    handleRouteError(res, e);
   }
 });
 
@@ -45,11 +48,11 @@ router.get('/:id', async (req, res) => {
   try {
     const car = await readCarById(env, req.params.id);
     if (!car) {
-      return res.status(404).json({ error: 'NOT_FOUND', message: 'Car not found' });
+      return sendError(res, 404, 'NOT_FOUND', 'Car not found');
     }
     res.json({ car });
   } catch (e) {
-    handleErr(res, e);
+    handleRouteError(res, e);
   }
 });
 
@@ -59,7 +62,7 @@ router.post('/', async (req, res) => {
     const car = await createCar(env, req.body || {});
     res.status(201).json({ car });
   } catch (e) {
-    handleErr(res, e);
+    handleRouteError(res, e);
   }
 });
 
@@ -69,7 +72,7 @@ router.patch('/:id', async (req, res) => {
     const car = await updateCar(env, req.params.id, req.body || {});
     res.json({ car });
   } catch (e) {
-    handleErr(res, e);
+    handleRouteError(res, e);
   }
 });
 
@@ -79,7 +82,7 @@ router.delete('/:id', async (req, res) => {
     const result = await deleteCar(env, req.params.id);
     res.json(result);
   } catch (e) {
-    handleErr(res, e);
+    handleRouteError(res, e);
   }
 });
 
@@ -90,7 +93,7 @@ router.post('/bulk-delete', async (req, res) => {
     const result = await bulkDeleteCars(env, ids);
     res.json(result);
   } catch (e) {
-    handleErr(res, e);
+    handleRouteError(res, e);
   }
 });
 
@@ -105,7 +108,7 @@ router.post('/:id/photos', upload.array('files', 20), async (req, res) => {
     const car = await uploadCarPhotos(env, req.params.id, files);
     res.status(201).json({ car });
   } catch (e) {
-    handleErr(res, e);
+    handleRouteError(res, e);
   }
 });
 
@@ -116,7 +119,7 @@ router.patch('/:id/photos/reorder', async (req, res) => {
     const car = await reorderCarPhotos(env, req.params.id, photos);
     res.json({ car });
   } catch (e) {
-    handleErr(res, e);
+    handleRouteError(res, e);
   }
 });
 
@@ -126,7 +129,7 @@ router.delete('/:id/photos/:name', async (req, res) => {
     const car = await deleteCarPhoto(env, req.params.id, req.params.name);
     res.json({ car });
   } catch (e) {
-    handleErr(res, e);
+    handleRouteError(res, e);
   }
 });
 

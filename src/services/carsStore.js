@@ -1,6 +1,7 @@
-import fs from 'fs/promises';
+﻿import fs from 'fs/promises';
 import path from 'path';
 import sharp from 'sharp';
+import { readCarsSnapshot, writeCarsSnapshot } from '../db/carsSqliteRepo.js';
 
 function carsDataDir(dataRoot) {
   // cars.json lives under DATA_ROOT/data/
@@ -33,6 +34,19 @@ function makeErr(status, code, message) {
   e.status = status;
   e.code = code;
   return e;
+}
+
+let sqliteWriteQueue = Promise.resolve();
+
+function isSqliteDriver(env) {
+  return env?.STORAGE_DRIVER === 'sqlite';
+}
+
+function withSqliteWriteQueue(fn) {
+  const run = async () => await fn();
+  const op = sqliteWriteQueue.then(run, run);
+  sqliteWriteQueue = op.catch(() => {});
+  return op;
 }
 
 async function fileExists(p) {
@@ -188,6 +202,15 @@ async function backupCurrent(env) {
 async function writeCarsAtomically(env, carsArray) {
   if (!Array.isArray(carsArray)) throw makeErr(500, 'CARS_JSON_WRONG_SHAPE', 'cars.json must be an array of cars');
 
+  if (isSqliteDriver(env)) {
+    try {
+      await writeCarsSnapshot(env, carsArray);
+      return;
+    } catch (err) {
+      throw makeErr(500, 'CARS_SQLITE_WRITE_FAILED', 'Failed to write cars to sqlite: ' + (err?.message || String(err)));
+    }
+  }
+
   // Ensure DATA_ROOT/data exists before writing tmp/final files
   await fs.mkdir(carsDataDir(env.DATA_ROOT), { recursive: true });
 
@@ -240,6 +263,9 @@ async function initIfMissingOrEmpty(env) {
 }
 
 export async function withWriteLock(env, fn) {
+  if (isSqliteDriver(env)) {
+    return withSqliteWriteQueue(fn);
+  }
   const release = await acquireWriteLock(env);
   try {
     await ensureConsistency(env);
@@ -251,6 +277,13 @@ export async function withWriteLock(env, fn) {
 }
 
 async function readCarsNoLock(env) {
+  if (isSqliteDriver(env)) {
+    try {
+      return await readCarsSnapshot(env);
+    } catch (err) {
+      throw makeErr(500, 'CARS_SQLITE_READ_FAILED', 'Failed to read cars from sqlite: ' + (err?.message || String(err)));
+    }
+  }
   const filePath = carsJsonPath(env.DATA_ROOT);
   await ensureConsistency(env);
 
@@ -494,7 +527,7 @@ async function ensureCarAssetsDir(env, car) {
 }
 
 async function toWebp(buffer) {
-  // 1280px по длинной стороне, webp, без EXIF
+  // 1280px РїРѕ РґР»РёРЅРЅРѕР№ СЃС‚РѕСЂРѕРЅРµ, webp, Р±РµР· EXIF
   return sharp(buffer)
     .rotate()
     .resize({ width: 1280, height: 1280, fit: 'inside', withoutEnlargement: true })
@@ -600,3 +633,6 @@ export async function deleteCarPhoto(env, id, name) {
     return car;
   });
 }
+
+
+
