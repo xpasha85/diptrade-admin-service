@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import healthRouter from './routes/health.js';
 import carsRouter from './routes/cars.js';
+import ordersRouter from './routes/orders.js';
 import { createOpenApiSpec } from './openapi/spec.js';
 
 function resolveDefaultDataRoot() {
@@ -39,6 +40,7 @@ export function createApp(opts = {}) {
   });
   app.use('/health', healthRouter);
   app.use('/cars', carsRouter);
+  app.use('/orders', ordersRouter);
 
   return app;
 }

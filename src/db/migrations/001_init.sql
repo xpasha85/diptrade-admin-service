@@ -43,3 +43,15 @@ CREATE INDEX IF NOT EXISTS idx_cars_price ON cars(price);
 CREATE INDEX IF NOT EXISTS idx_cars_year ON cars(year);
 CREATE INDEX IF NOT EXISTS idx_cars_added_at ON cars(added_at);
 CREATE INDEX IF NOT EXISTS idx_car_photos_order ON car_photos(car_id, sort_order);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  message TEXT,
+  status TEXT NOT NULL DEFAULT 'new',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);

@@ -113,6 +113,8 @@ export function loadEnv() {
 
   const SQLITE_PATH = (process.env.SQLITE_PATH || '').trim();
   const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
+  const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+  const TELEGRAM_CHAT_ID = (process.env.TELEGRAM_CHAT_ID || '').trim();
 
   if (!ADMIN_TOKEN) {
     throw new Error('ADMIN_TOKEN must not be empty');
@@ -126,6 +128,8 @@ export function loadEnv() {
     MAX_BACKUPS,
     STORAGE_DRIVER,
     SQLITE_PATH,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
     ENV_FILE: loadedEnvFile
   };
 }
