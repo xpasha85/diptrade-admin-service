@@ -3,6 +3,7 @@
 Основной документ для реализации и контроля этапов:
 
 - [IMPLEMENTATION_ROADMAP.md](/c:/Working_files/Сайт новый по авто/Архитектура сайта_мое/diptrade-tmp/admin-service/IMPLEMENTATION_ROADMAP.md)
+- [PROD_MIGRATION_RUNBOOK.md](/c:/Working_files/Сайт новый по авто/Архитектура сайта_мое/diptrade-tmp/admin-service/PROD_MIGRATION_RUNBOOK.md)
 
 Дополнительно (текущий контракт API):
 
@@ -24,3 +25,16 @@ OpenAPI спецификация (runtime):
 - `npm run report:integration:api:sqlite`
 - `npm run report:smoke:e2e:web`
 - `npm run verify:final`
+
+Локальный env:
+
+- создать `.env.local` по образцу `.env.local.example`
+- `dev-admin-service.cmd` запускает сервис через `ENV_FILE=.env.local`
+- формат локального файла такой же, как у production env-файла
+
+Versioned deploy-артефакты:
+
+- `deploy/env/admin-service.env.example`
+- `deploy/systemd/diptrade-admin.service`
+- `deploy/scripts/diptrade-admin-service-deploy.sh`
+- `deploy/nginx/diptrade-api.conf`

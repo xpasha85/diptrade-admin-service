@@ -6,6 +6,8 @@ cars.json
 assets/
 *.lock
 .env
+.env.local
+.env.*.local
 
 # IDE/OS
 .vscode/
