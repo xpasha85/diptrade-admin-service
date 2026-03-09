@@ -66,6 +66,7 @@ async function main() {
   const base = `http://127.0.0.1:${port}`;
 
   let createdId = null;
+  const cleanupIds = new Set();
 
   try {
     const healthRes = await fetch(`${base}/health`);
@@ -88,6 +89,45 @@ async function main() {
     });
     const created = await createRes.json();
     createdId = created?.car?.id;
+    if (createdId != null) cleanupIds.add(Number(createdId));
+
+    const createSoldRes = await fetch(`${base}/cars`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${adminToken}`
+      },
+      body: JSON.stringify({
+        brand: 'Smoke',
+        model: 'Sold',
+        year: 2023,
+        price: 1333000,
+        country: 'KR',
+        is_sold: true
+      })
+    });
+    const createdSold = await createSoldRes.json();
+    const soldId = createdSold?.car?.id;
+    if (soldId != null) cleanupIds.add(Number(soldId));
+
+    const createCnRes = await fetch(`${base}/cars`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${adminToken}`
+      },
+      body: JSON.stringify({
+        brand: 'Paged',
+        model: 'CnStock',
+        year: 2022,
+        price: 999000,
+        country: 'CN',
+        in_stock: true
+      })
+    });
+    const createdCn = await createCnRes.json();
+    const cnId = createdCn?.car?.id;
+    if (cnId != null) cleanupIds.add(Number(cnId));
 
     const patchRes = await fetch(`${base}/cars/${createdId}`, {
       method: 'PATCH',
@@ -101,6 +141,15 @@ async function main() {
 
     const oneRes = await fetch(`${base}/cars/${createdId}`);
     const one = await oneRes.json();
+
+    const filteredRes = await fetch(`${base}/cars?country_code=KR&status=active&q=smoke&page=1&per_page=1&sort=id_desc`);
+    const filtered = await filteredRes.json();
+
+    const secondPageRes = await fetch(`${base}/cars?country_code=KR&q=smoke&page=2&per_page=1&sort=id_desc`);
+    const secondPage = await secondPageRes.json();
+
+    const cnFilterRes = await fetch(`${base}/cars?country=CN&in_stock=true&price_to=1000000`);
+    const cnFiltered = await cnFilterRes.json();
 
     const png = await sharp({
       create: {
@@ -152,10 +201,11 @@ async function main() {
         'content-type': 'application/json',
         authorization: `Bearer ${adminToken}`
       },
-      body: JSON.stringify({ ids: [createdId] })
+      body: JSON.stringify({ ids: Array.from(cleanupIds.values()) })
     });
     const bulk = await bulkRes.json();
 
+    cleanupIds.clear();
     createdId = null;
 
     const afterRes = await fetch(`${base}/cars`);
@@ -164,9 +214,20 @@ async function main() {
     console.log(`health_status=${healthRes.status}`);
     console.log(`before_count=${(before?.cars || []).length}`);
     console.log(`create_status=${createRes.status}`);
+    console.log(`create_sold_status=${createSoldRes.status}`);
+    console.log(`create_cn_status=${createCnRes.status}`);
     console.log(`patch_status=${patchRes.status}`);
     console.log(`get_one_status=${oneRes.status}`);
     console.log(`updated_price=${patched?.car?.price}`);
+    console.log(`filtered_status=${filteredRes.status}`);
+    console.log(`filtered_count=${(filtered?.cars || []).length}`);
+    console.log(`filtered_total=${filtered?.pagination?.total ?? 'none'}`);
+    console.log(`filtered_page=${filtered?.pagination?.page ?? 'none'}`);
+    console.log(`filtered_per_page=${filtered?.pagination?.per_page ?? 'none'}`);
+    console.log(`second_page_status=${secondPageRes.status}`);
+    console.log(`second_page_count=${(secondPage?.cars || []).length}`);
+    console.log(`cn_filter_status=${cnFilterRes.status}`);
+    console.log(`cn_filter_count=${(cnFiltered?.cars || []).length}`);
     console.log(`upload_status=${uploadRes.status}`);
     console.log(`upload_photo_count=${photos.length}`);
     console.log(`reorder_status=${reorderRes.status}`);
@@ -175,7 +236,18 @@ async function main() {
     console.log(`bulk_deleted=${bulk?.deleted}`);
     console.log(`after_count=${(after?.cars || []).length}`);
   } finally {
-    if (createdId != null) {
+    if (cleanupIds.size > 0) {
+      for (const id of cleanupIds) {
+        try {
+          await fetch(`${base}/cars/${id}`, {
+            method: 'DELETE',
+            headers: {
+              authorization: `Bearer ${adminToken}`
+            }
+          });
+        } catch {}
+      }
+    } else if (createdId != null) {
       try {
         await fetch(`${base}/cars/${createdId}`, {
           method: 'DELETE',

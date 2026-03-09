@@ -8,10 +8,19 @@
     "start": "node src/index.js",
     "db:import": "node scripts/import-cars-json-to-sqlite.js",
     "db:import:dry": "node scripts/import-cars-json-to-sqlite.js --dry-run",
+    "db:backup": "node scripts/db-backup.js",
+    "db:restore": "node scripts/db-restore.js",
+    "db:rollback": "node scripts/db-rollback.js",
+    "test:integration:api:sqlite": "node scripts/integration-api-sqlite.js",
+    "report:integration:api:sqlite": "node scripts/integration-api-sqlite-report.js",
+    "smoke:e2e:web": "node scripts/e2e-smoke-web.js",
+    "report:smoke:e2e:web": "node scripts/e2e-smoke-web-report.js",
     "smoke:api:sqlite": "node scripts/smoke-api-sqlite.js",
-    "report:smoke:api:sqlite": "node scripts/smoke-api-sqlite-report.js"
+    "report:smoke:api:sqlite": "node scripts/smoke-api-sqlite-report.js",
+    "verify:final": "npm run report:integration:api:sqlite && npm run report:smoke:e2e:web && npm run report:smoke:api:sqlite"
   },
   "dependencies": {
+    "ajv": "^8.17.1",
     "better-sqlite3": "^11.8.1",
     "express": "^4.19.2",
     "multer": "^2.0.2",

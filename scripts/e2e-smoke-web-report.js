@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
-const smokeScriptPath = path.resolve(__dirname, 'smoke-api-sqlite.js');
+const e2eScriptPath = path.resolve(__dirname, 'e2e-smoke-web.js');
 
 function pad(n) {
   return String(n).padStart(2, '0');
@@ -23,22 +23,15 @@ function parseKeyValueLines(stdoutText) {
     if (!line) continue;
     const match = line.match(/^([a-zA-Z0-9_]+)=(.*)$/);
     if (!match) continue;
-    const key = match[1];
-    const value = match[2].trim();
-    values[key] = value;
+    values[match[1]] = match[2].trim();
   }
   return values;
 }
 
-function toIntOrNull(value) {
-  const n = Number.parseInt(String(value), 10);
-  return Number.isFinite(n) ? n : null;
-}
-
-function createChecks(values, smokeExitCode) {
+function createChecks(values, e2eExitCode) {
   const checks = [];
 
-  const statusEquals = (key, expected) => {
+  const equals = (key, expected) => {
     const actual = values[key];
     checks.push({
       id: key,
@@ -49,64 +42,33 @@ function createChecks(values, smokeExitCode) {
     });
   };
 
-  const statusIn = (key, expectedList) => {
-    const actual = values[key];
-    checks.push({
-      id: key,
-      title: `${key} in [${expectedList.join(', ')}]`,
-      expected: expectedList.join(', '),
-      actual: actual ?? null,
-      pass: actual != null && expectedList.includes(actual)
-    });
-  };
-
-  statusEquals('health_status', 200);
-  statusEquals('create_status', 201);
-  statusEquals('create_sold_status', 201);
-  statusEquals('create_cn_status', 201);
-  statusEquals('patch_status', 200);
-  statusEquals('get_one_status', 200);
-  statusEquals('filtered_status', 200);
-  statusEquals('second_page_status', 200);
-  statusEquals('cn_filter_status', 200);
-  statusIn('upload_status', ['200', '201']);
-  statusEquals('reorder_status', 200);
-  statusIn('delete_photo_status', ['200', '204']);
-  statusEquals('bulk_delete_status', 200);
-  statusEquals('bulk_deleted', 3);
-  statusEquals('updated_price', 2222000);
-  statusEquals('filtered_count', 1);
-  statusEquals('filtered_total', 1);
-  statusEquals('filtered_page', 1);
-  statusEquals('filtered_per_page', 1);
-  statusEquals('second_page_count', 1);
-  statusEquals('cn_filter_count', 1);
-
-  const photoCount = toIntOrNull(values.upload_photo_count);
-  checks.push({
-    id: 'upload_photo_count',
-    title: 'upload_photo_count >= 1',
-    expected: '>= 1',
-    actual: photoCount,
-    pass: photoCount != null && photoCount >= 1
-  });
-
-  const beforeCount = toIntOrNull(values.before_count);
-  const afterCount = toIntOrNull(values.after_count);
-  checks.push({
-    id: 'count_roundtrip',
-    title: 'after_count == before_count',
-    expected: beforeCount,
-    actual: afterCount,
-    pass: beforeCount != null && afterCount != null && beforeCount === afterCount
-  });
+  equals('api_health_status', 200);
+  equals('api_create_status', 201);
+  equals('api_cars_status', 200);
+  equals('api_cars_has_pagination', 1);
+  equals('api_car_status', 200);
+  equals('api_cors_origin', '*');
+  equals('admin_index_status', 200);
+  equals('admin_index_has_app_js', 1);
+  equals('admin_api_js_status', 200);
+  equals('admin_bulk_delete_ref', 1);
+  equals('site_index_status', 200);
+  equals('site_catalog_status', 200);
+  equals('site_history_status', 200);
+  equals('site_card_status', 200);
+  equals('site_index_has_main_js', 1);
+  equals('site_catalog_has_catalog_js', 1);
+  equals('site_history_has_history_js', 1);
+  equals('site_card_has_card_js', 1);
+  equals('site_no_cars_json_refs', 1);
+  equals('site_has_cars_api_refs', 1);
 
   checks.push({
-    id: 'smoke_exit_code',
-    title: 'smoke process exit code == 0',
+    id: 'e2e_exit_code',
+    title: 'e2e process exit code == 0',
     expected: 0,
-    actual: smokeExitCode,
-    pass: smokeExitCode === 0
+    actual: e2eExitCode,
+    pass: e2eExitCode === 0
   });
 
   return checks;
@@ -114,11 +76,11 @@ function createChecks(values, smokeExitCode) {
 
 function createMarkdown(report) {
   const lines = [];
-  lines.push('# API SQLite Smoke Report');
+  lines.push('# Web E2E Smoke Report');
   lines.push('');
   lines.push(`- Generated at: ${report.generatedAt}`);
   lines.push(`- Status: ${report.status}`);
-  lines.push(`- Smoke exit code: ${report.smokeExitCode}`);
+  lines.push(`- E2E exit code: ${report.e2eExitCode}`);
   lines.push(`- Command: \`${report.command.join(' ')}\``);
   lines.push(`- Report dir: \`${report.reportDirRelative}\``);
   lines.push('');
@@ -148,9 +110,9 @@ function createMarkdown(report) {
   return `${lines.join('\n')}\n`;
 }
 
-async function runSmoke(args) {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [smokeScriptPath, ...args], {
+async function runE2E(args) {
+  return new Promise(resolve => {
+    const child = spawn(process.execPath, [e2eScriptPath, ...args], {
       cwd: projectRoot,
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe']
@@ -159,19 +121,19 @@ async function runSmoke(args) {
     let stdout = '';
     let stderr = '';
 
-    child.stdout.on('data', (chunk) => {
+    child.stdout.on('data', chunk => {
       const text = chunk.toString();
       stdout += text;
       process.stdout.write(text);
     });
 
-    child.stderr.on('data', (chunk) => {
+    child.stderr.on('data', chunk => {
       const text = chunk.toString();
       stderr += text;
       process.stderr.write(text);
     });
 
-    child.on('close', (code) => {
+    child.on('close', code => {
       resolve({
         exitCode: code ?? 1,
         stdout,
@@ -185,12 +147,12 @@ async function main() {
   const args = process.argv.slice(2);
   const generatedAt = new Date().toISOString();
   const dirStamp = timestampForDir();
-  const reportDir = path.resolve(projectRoot, 'reports', 'smoke-api-sqlite', dirStamp);
+  const reportDir = path.resolve(projectRoot, 'reports', 'e2e-smoke-web', dirStamp);
   const reportDirRelative = path.relative(projectRoot, reportDir).replace(/\\/g, '/');
 
   await fs.mkdir(reportDir, { recursive: true });
 
-  const run = await runSmoke(args);
+  const run = await runE2E(args);
   const values = parseKeyValueLines(run.stdout);
   const checks = createChecks(values, run.exitCode);
   const passed = checks.filter(c => c.pass).length;
@@ -204,8 +166,8 @@ async function main() {
   const report = {
     generatedAt,
     status,
-    smokeExitCode: run.exitCode,
-    command: ['node', 'scripts/smoke-api-sqlite.js', ...args],
+    e2eExitCode: run.exitCode,
+    command: ['node', 'scripts/e2e-smoke-web.js', ...args],
     reportDirRelative,
     values,
     checks,
@@ -241,7 +203,7 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('report generation failed:', err?.message || String(err));
+main().catch(err => {
+  console.error('e2e report generation failed:', err?.message || String(err));
   process.exit(1);
 });

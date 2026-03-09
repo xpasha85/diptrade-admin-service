@@ -1,4 +1,4 @@
-﻿import Database from 'better-sqlite3';
+import Database from 'better-sqlite3';
 import { resolveSqlitePath } from './sqlite.js';
 
 const RESERVED_FIELDS = new Set([
@@ -137,6 +137,15 @@ function openDb(env) {
   return new Database(dbPath);
 }
 
+function normalizeIds(ids) {
+  if (!Array.isArray(ids)) return [];
+  return Array.from(new Set(ids.map(x => Number(x)).filter(Number.isFinite)));
+}
+
+function makeInClause(ids) {
+  return ids.map(() => '?').join(', ');
+}
+
 export async function readCarsSnapshot(env) {
   const db = openDb(env);
   try {
@@ -161,6 +170,210 @@ export async function readCarsSnapshot(env) {
   }
 }
 
+export async function readCarById(env, id) {
+  const numId = Number(id);
+  if (!Number.isFinite(numId)) return null;
+
+  const db = openDb(env);
+  try {
+    const row = db.prepare(`
+      SELECT
+        id, brand, model, year, price, country_code, assets_folder, added_at,
+        in_stock, is_sold, is_visible, featured, is_auction, auction_benefit,
+        month, sold_on, specs_json, costs_json, accidents_json, extra_json
+      FROM cars
+      WHERE id = ?
+    `).get(numId);
+
+    if (!row) return null;
+
+    const photoRows = db.prepare(`
+      SELECT car_id, sort_order, file_name
+      FROM car_photos
+      WHERE car_id = ?
+      ORDER BY sort_order
+    `).all(numId);
+
+    const cars = mapRowsToCars([row], photoRows);
+    return cars[0] || null;
+  } finally {
+    db.close();
+  }
+}
+
+export async function readCarsByIds(env, ids) {
+  const normalized = normalizeIds(ids);
+  if (normalized.length === 0) return [];
+
+  const db = openDb(env);
+  try {
+    const inClause = makeInClause(normalized);
+
+    const rows = db.prepare(`
+      SELECT
+        id, brand, model, year, price, country_code, assets_folder, added_at,
+        in_stock, is_sold, is_visible, featured, is_auction, auction_benefit,
+        month, sold_on, specs_json, costs_json, accidents_json, extra_json
+      FROM cars
+      WHERE id IN (${inClause})
+      ORDER BY id
+    `).all(...normalized);
+
+    if (rows.length === 0) return [];
+
+    const photoRows = db.prepare(`
+      SELECT car_id, sort_order, file_name
+      FROM car_photos
+      WHERE car_id IN (${inClause})
+      ORDER BY car_id, sort_order
+    `).all(...normalized);
+
+    return mapRowsToCars(rows, photoRows);
+  } finally {
+    db.close();
+  }
+}
+
+export async function getNextCarId(env) {
+  const db = openDb(env);
+  try {
+    const row = db.prepare(`SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM cars`).get();
+    return Number(row?.next_id || 1);
+  } finally {
+    db.close();
+  }
+}
+
+export async function createCar(env, car) {
+  const db = openDb(env);
+  try {
+    const insertCar = db.prepare(`
+      INSERT INTO cars (
+        id, brand, model, year, price, country_code, assets_folder, added_at,
+        in_stock, is_sold, is_visible, featured, is_auction, auction_benefit,
+        month, sold_on, specs_json, costs_json, accidents_json, extra_json
+      ) VALUES (
+        @id, @brand, @model, @year, @price, @country_code, @assets_folder, @added_at,
+        @in_stock, @is_sold, @is_visible, @featured, @is_auction, @auction_benefit,
+        @month, @sold_on, @specs_json, @costs_json, @accidents_json, @extra_json
+      )
+    `);
+
+    const insertPhoto = db.prepare(`
+      INSERT INTO car_photos (car_id, sort_order, file_name)
+      VALUES (?, ?, ?)
+    `);
+
+    const tx = db.transaction(item => {
+      const row = mapCarToRow(item);
+      insertCar.run(row);
+
+      const photos = Array.isArray(item?.photos) ? item.photos : [];
+      for (let i = 0; i < photos.length; i++) {
+        const name = photos[i];
+        if (typeof name !== 'string' || name.trim().length === 0) continue;
+        insertPhoto.run(row.id, i + 1, name);
+      }
+    });
+
+    tx(car);
+  } finally {
+    db.close();
+  }
+}
+
+export async function replaceCar(env, car) {
+  const db = openDb(env);
+  try {
+    const updateCar = db.prepare(`
+      UPDATE cars
+      SET
+        brand = @brand,
+        model = @model,
+        year = @year,
+        price = @price,
+        country_code = @country_code,
+        assets_folder = @assets_folder,
+        added_at = @added_at,
+        in_stock = @in_stock,
+        is_sold = @is_sold,
+        is_visible = @is_visible,
+        featured = @featured,
+        is_auction = @is_auction,
+        auction_benefit = @auction_benefit,
+        month = @month,
+        sold_on = @sold_on,
+        specs_json = @specs_json,
+        costs_json = @costs_json,
+        accidents_json = @accidents_json,
+        extra_json = @extra_json,
+        updated_at = datetime('now')
+      WHERE id = @id
+    `);
+
+    const wipePhotos = db.prepare('DELETE FROM car_photos WHERE car_id = ?');
+    const insertPhoto = db.prepare(`
+      INSERT INTO car_photos (car_id, sort_order, file_name)
+      VALUES (?, ?, ?)
+    `);
+
+    const tx = db.transaction(item => {
+      const row = mapCarToRow(item);
+      const result = updateCar.run(row);
+      if (result.changes === 0) {
+        throw new Error('Car not found');
+      }
+
+      wipePhotos.run(row.id);
+
+      const photos = Array.isArray(item?.photos) ? item.photos : [];
+      for (let i = 0; i < photos.length; i++) {
+        const name = photos[i];
+        if (typeof name !== 'string' || name.trim().length === 0) continue;
+        insertPhoto.run(row.id, i + 1, name);
+      }
+    });
+
+    tx(car);
+  } finally {
+    db.close();
+  }
+}
+
+export async function deleteCarById(env, id) {
+  const numId = Number(id);
+  if (!Number.isFinite(numId)) return 0;
+
+  const db = openDb(env);
+  try {
+    const result = db.prepare('DELETE FROM cars WHERE id = ?').run(numId);
+    return Number(result.changes || 0);
+  } finally {
+    db.close();
+  }
+}
+
+export async function bulkDeleteCarsByIds(env, ids) {
+  const normalized = normalizeIds(ids);
+  if (normalized.length === 0) return 0;
+
+  const db = openDb(env);
+  try {
+    const inClause = makeInClause(normalized);
+    const del = db.prepare(`DELETE FROM cars WHERE id IN (${inClause})`);
+
+    const tx = db.transaction(items => {
+      const result = del.run(...items);
+      return Number(result.changes || 0);
+    });
+
+    return tx(normalized);
+  } finally {
+    db.close();
+  }
+}
+
+// Used by one-shot import scripts. Runtime API writes should use SQL CRUD methods above.
 export async function writeCarsSnapshot(env, cars) {
   if (!Array.isArray(cars)) {
     throw new Error('cars must be an array');

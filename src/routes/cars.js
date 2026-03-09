@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
 import {
-  readCars,
+  readCarsWithQuery,
   readCarById,
   createCar,
   updateCar,
@@ -14,6 +14,12 @@ import {
 import { loadEnv } from '../config/env.js';
 import { handleRouteError, sendError } from '../http/errors.js';
 import { requireAdminToken } from '../middleware/adminAuth.js';
+import {
+  validateCreateCarPayload,
+  validateUpdateCarPayload,
+  validateBulkDeletePayload,
+  validateReorderPhotosPayload
+} from '../middleware/validatePayload.js';
 
 const router = Router();
 const env = loadEnv();
@@ -37,8 +43,11 @@ const upload = multer({
 
 router.get('/', async (req, res) => {
   try {
-    const cars = await readCars(env);
-    res.json({ cars });
+    const result = await readCarsWithQuery(env, req.query || {});
+    if (result.pagination) {
+      return res.json({ cars: result.cars, pagination: result.pagination });
+    }
+    res.json({ cars: result.cars });
   } catch (e) {
     handleRouteError(res, e);
   }
@@ -57,7 +66,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // Stage D: create
-router.post('/', async (req, res) => {
+router.post('/', validateCreateCarPayload, async (req, res) => {
   try {
     const car = await createCar(env, req.body || {});
     res.status(201).json({ car });
@@ -67,7 +76,7 @@ router.post('/', async (req, res) => {
 });
 
 // Stage D: update
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', validateUpdateCarPayload, async (req, res) => {
   try {
     const car = await updateCar(env, req.params.id, req.body || {});
     res.json({ car });
@@ -87,7 +96,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 // Stage D: bulk delete
-router.post('/bulk-delete', async (req, res) => {
+router.post('/bulk-delete', validateBulkDeletePayload, async (req, res) => {
   try {
     const ids = req.body?.ids;
     const result = await bulkDeleteCars(env, ids);
@@ -113,7 +122,7 @@ router.post('/:id/photos', upload.array('files', 20), async (req, res) => {
 });
 
 // Reorder photos
-router.patch('/:id/photos/reorder', async (req, res) => {
+router.patch('/:id/photos/reorder', validateReorderPhotosPayload, async (req, res) => {
   try {
     const photos = req.body?.photos;
     const car = await reorderCarPhotos(env, req.params.id, photos);

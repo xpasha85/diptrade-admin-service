@@ -1,7 +1,16 @@
 ﻿import fs from 'fs/promises';
 import path from 'path';
 import sharp from 'sharp';
-import { readCarsSnapshot, writeCarsSnapshot } from '../db/carsSqliteRepo.js';
+import {
+  readCarsSnapshot,
+  readCarById as readCarByIdSqlite,
+  readCarsByIds as readCarsByIdsSqlite,
+  getNextCarId as getNextCarIdSqlite,
+  createCar as createCarSqlite,
+  replaceCar as replaceCarSqlite,
+  deleteCarById as deleteCarByIdSqlite,
+  bulkDeleteCarsByIds as bulkDeleteCarsByIdsSqlite
+} from '../db/carsSqliteRepo.js';
 
 function carsDataDir(dataRoot) {
   // cars.json lives under DATA_ROOT/data/
@@ -203,12 +212,7 @@ async function writeCarsAtomically(env, carsArray) {
   if (!Array.isArray(carsArray)) throw makeErr(500, 'CARS_JSON_WRONG_SHAPE', 'cars.json must be an array of cars');
 
   if (isSqliteDriver(env)) {
-    try {
-      await writeCarsSnapshot(env, carsArray);
-      return;
-    } catch (err) {
-      throw makeErr(500, 'CARS_SQLITE_WRITE_FAILED', 'Failed to write cars to sqlite: ' + (err?.message || String(err)));
-    }
+    throw makeErr(500, 'CARS_SQLITE_WRITE_PATH_INVALID', 'SQLite writes must use SQL CRUD methods');
   }
 
   // Ensure DATA_ROOT/data exists before writing tmp/final files
@@ -404,6 +408,309 @@ function ensureMainPhotoExistsOrThrow(env, car) {
   });
 }
 
+const SUPPORTED_COUNTRIES = new Set(['KR', 'CN', 'RU']);
+const SUPPORTED_STATUS_FILTERS = new Set(['active', 'featured', 'auction', 'stock', 'sold', 'hidden']);
+const SORT_ALIASES = new Map([
+  ['newest', 'added_at_desc'],
+  ['cheap', 'price_asc'],
+  ['expensive', 'price_desc'],
+  ['year_new', 'year_desc']
+]);
+const SUPPORTED_SORTS = new Set([
+  'id_asc',
+  'id_desc',
+  'price_asc',
+  'price_desc',
+  'year_asc',
+  'year_desc',
+  'added_at_asc',
+  'added_at_desc'
+]);
+const DEFAULT_PAGE_SIZE = 20;
+const MAX_PAGE_SIZE = 200;
+
+function firstQueryValue(v) {
+  if (Array.isArray(v)) {
+    if (v.length === 0) return '';
+    return String(v[0] ?? '').trim();
+  }
+  if (v == null) return '';
+  return String(v).trim();
+}
+
+function queryValueExists(v) {
+  if (Array.isArray(v)) return v.length > 0 && String(v[0] ?? '').trim() !== '';
+  return v != null && String(v).trim() !== '';
+}
+
+function parseOptionalNumberQuery(name, raw) {
+  const value = firstQueryValue(raw);
+  if (!value) return null;
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    throw makeErr(400, 'VALIDATION_FAILED', `${name} must be a number`);
+  }
+  return num;
+}
+
+function parsePositiveIntQuery(name, raw) {
+  const value = firstQueryValue(raw);
+  const num = Number(value);
+  if (!Number.isInteger(num) || num <= 0) {
+    throw makeErr(400, 'VALIDATION_FAILED', `${name} must be a positive integer`);
+  }
+  return num;
+}
+
+function parseOptionalBooleanQuery(name, raw) {
+  const value = firstQueryValue(raw).toLowerCase();
+  if (!value) return undefined;
+  if (['1', 'true', 'yes', 'on'].includes(value)) return true;
+  if (['0', 'false', 'no', 'off'].includes(value)) return false;
+  throw makeErr(400, 'VALIDATION_FAILED', `${name} must be boolean`);
+}
+
+function parseQueryList(raw) {
+  const source = Array.isArray(raw) ? raw : [raw];
+  const out = [];
+  for (const item of source) {
+    if (item == null) continue;
+    const parts = String(item).split(',');
+    for (const p of parts) {
+      const clean = p.trim();
+      if (clean) out.push(clean);
+    }
+  }
+  return out;
+}
+
+function normalizeCountryCode(car) {
+  return String(car?.country_code || car?.country || '')
+    .trim()
+    .toUpperCase();
+}
+
+function resolveSpecs(car) {
+  const specs = car?.specs && typeof car.specs === 'object' ? car.specs : {};
+  return specs;
+}
+
+function numericOrNull(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizeSort(rawSort) {
+  if (!rawSort) return '';
+  const sort = rawSort.trim().toLowerCase();
+  const alias = SORT_ALIASES.get(sort);
+  const resolved = alias || sort;
+  if (!SUPPORTED_SORTS.has(resolved)) {
+    throw makeErr(
+      400,
+      'VALIDATION_FAILED',
+      `sort is invalid (allowed: ${Array.from(SUPPORTED_SORTS).join(', ')})`
+    );
+  }
+  return resolved;
+}
+
+function parseCarsQuery(rawQuery = {}) {
+  const countryRaw = firstQueryValue(rawQuery.country_code || rawQuery.country).toUpperCase();
+  if (countryRaw && !SUPPORTED_COUNTRIES.has(countryRaw)) {
+    throw makeErr(400, 'VALIDATION_FAILED', 'country_code is invalid');
+  }
+
+  const status = firstQueryValue(rawQuery.status).toLowerCase();
+  if (status && status !== 'all' && !SUPPORTED_STATUS_FILTERS.has(status)) {
+    throw makeErr(400, 'VALIDATION_FAILED', 'status is invalid');
+  }
+
+  const priceFrom = parseOptionalNumberQuery('price_from', rawQuery.price_from);
+  const priceTo = parseOptionalNumberQuery('price_to', rawQuery.price_to);
+  if (priceFrom != null && priceTo != null && priceFrom > priceTo) {
+    throw makeErr(400, 'VALIDATION_FAILED', 'price_from must be <= price_to');
+  }
+
+  const yearFrom = parseOptionalNumberQuery('year_from', rawQuery.year_from);
+  const yearTo = parseOptionalNumberQuery('year_to', rawQuery.year_to);
+  if (yearFrom != null && yearTo != null && yearFrom > yearTo) {
+    throw makeErr(400, 'VALIDATION_FAILED', 'year_from must be <= year_to');
+  }
+
+  const volumeFrom = parseOptionalNumberQuery('volume_from', rawQuery.volume_from);
+  const volumeTo = parseOptionalNumberQuery('volume_to', rawQuery.volume_to);
+  if (volumeFrom != null && volumeTo != null && volumeFrom > volumeTo) {
+    throw makeErr(400, 'VALIDATION_FAILED', 'volume_from must be <= volume_to');
+  }
+
+  const hpFrom = parseOptionalNumberQuery('hp_from', rawQuery.hp_from);
+  const hpTo = parseOptionalNumberQuery('hp_to', rawQuery.hp_to);
+  if (hpFrom != null && hpTo != null && hpFrom > hpTo) {
+    throw makeErr(400, 'VALIDATION_FAILED', 'hp_from must be <= hp_to');
+  }
+
+  const fuelList = parseQueryList(rawQuery.fuel).map(x => x.toLowerCase());
+  const fuels = new Set(fuelList);
+
+  const hasPage = queryValueExists(rawQuery.page);
+  const hasPerPage = queryValueExists(rawQuery.per_page);
+  const hasPageSize = queryValueExists(rawQuery.page_size);
+  const hasLimit = queryValueExists(rawQuery.limit);
+  const paginationEnabled = hasPage || hasPerPage || hasPageSize || hasLimit;
+
+  let page = null;
+  let perPage = null;
+  if (paginationEnabled) {
+    page = hasPage ? parsePositiveIntQuery('page', rawQuery.page) : 1;
+    if (hasPerPage) {
+      perPage = parsePositiveIntQuery('per_page', rawQuery.per_page);
+    } else if (hasPageSize) {
+      perPage = parsePositiveIntQuery('page_size', rawQuery.page_size);
+    } else if (hasLimit) {
+      perPage = parsePositiveIntQuery('limit', rawQuery.limit);
+    } else {
+      perPage = DEFAULT_PAGE_SIZE;
+    }
+
+    if (perPage > MAX_PAGE_SIZE) {
+      throw makeErr(400, 'VALIDATION_FAILED', `per_page must be <= ${MAX_PAGE_SIZE}`);
+    }
+  }
+
+  return {
+    q: firstQueryValue(rawQuery.q).toLowerCase(),
+    brand: firstQueryValue(rawQuery.brand).toLowerCase(),
+    model: firstQueryValue(rawQuery.model).toLowerCase(),
+    countryCode: countryRaw || '',
+    status: status && status !== 'all' ? status : '',
+    priceFrom,
+    priceTo,
+    yearFrom,
+    yearTo,
+    volumeFrom,
+    volumeTo,
+    hpFrom,
+    hpTo,
+    fuels,
+    inStock: parseOptionalBooleanQuery('in_stock', rawQuery.in_stock),
+    isAuction: parseOptionalBooleanQuery('is_auction', rawQuery.is_auction),
+    fullTime: parseOptionalBooleanQuery('full_time', rawQuery.full_time),
+    featured: parseOptionalBooleanQuery('featured', rawQuery.featured),
+    isVisible: parseOptionalBooleanQuery('is_visible', rawQuery.is_visible),
+    isSold: parseOptionalBooleanQuery('is_sold', rawQuery.is_sold),
+    sort: normalizeSort(firstQueryValue(rawQuery.sort)),
+    pagination: paginationEnabled ? { page, perPage } : null
+  };
+}
+
+function filterCarsByQuery(cars, query) {
+  const terms = query.q ? query.q.split(/\s+/).filter(Boolean) : [];
+
+  return cars.filter(car => {
+    const specs = resolveSpecs(car);
+    const countryCode = normalizeCountryCode(car);
+
+    if (query.brand && !String(car?.brand || '').toLowerCase().includes(query.brand)) return false;
+    if (query.model && !String(car?.model || '').toLowerCase().includes(query.model)) return false;
+    if (query.countryCode && countryCode !== query.countryCode) return false;
+
+    const price = numericOrNull(car?.price);
+    if (query.priceFrom != null && (price == null || price < query.priceFrom)) return false;
+    if (query.priceTo != null && (price == null || price > query.priceTo)) return false;
+
+    const year = numericOrNull(car?.year);
+    if (query.yearFrom != null && (year == null || year < query.yearFrom)) return false;
+    if (query.yearTo != null && (year == null || year > query.yearTo)) return false;
+
+    const volume = numericOrNull(specs?.volume);
+    if (query.volumeFrom != null && (volume == null || volume < query.volumeFrom)) return false;
+    if (query.volumeTo != null && (volume == null || volume > query.volumeTo)) return false;
+
+    const hp = numericOrNull(specs?.hp);
+    if (query.hpFrom != null && (hp == null || hp < query.hpFrom)) return false;
+    if (query.hpTo != null && (hp == null || hp > query.hpTo)) return false;
+
+    if (query.fuels.size > 0) {
+      const fuel = String(specs?.fuel || car?.fuel || '').toLowerCase();
+      if (!query.fuels.has(fuel)) return false;
+    }
+
+    if (query.inStock !== undefined && Boolean(car?.in_stock) !== query.inStock) return false;
+    if (query.isAuction !== undefined && Boolean(car?.is_auction) !== query.isAuction) return false;
+    if (query.featured !== undefined && Boolean(car?.featured) !== query.featured) return false;
+    if (query.isVisible !== undefined && (car?.is_visible !== false) !== query.isVisible) return false;
+    if (query.isSold !== undefined && Boolean(car?.is_sold) !== query.isSold) return false;
+
+    if (query.fullTime !== undefined) {
+      const isFullTime = Boolean(car?.full_time || specs?.is_4wd);
+      if (isFullTime !== query.fullTime) return false;
+    }
+
+    if (query.status) {
+      if (query.status === 'active' && (car?.is_visible === false || car?.is_sold === true)) return false;
+      if (query.status === 'featured' && !car?.featured) return false;
+      if (query.status === 'auction' && !car?.is_auction) return false;
+      if (query.status === 'stock' && !car?.in_stock) return false;
+      if (query.status === 'sold' && !car?.is_sold) return false;
+      if (query.status === 'hidden' && car?.is_visible !== false) return false;
+    }
+
+    if (terms.length > 0) {
+      const searchStr = [
+        car?.id,
+        car?.brand,
+        car?.model,
+        car?.year,
+        car?.web_title,
+        car?.price,
+        countryCode,
+        specs?.fuel,
+        specs?.hp,
+        specs?.volume
+      ]
+        .map(x => String(x ?? '').toLowerCase())
+        .join(' ');
+
+      const matchesAllTerms = terms.every(term => searchStr.includes(term));
+      if (!matchesAllTerms) return false;
+    }
+
+    return true;
+  });
+}
+
+function compareNullableNumbers(a, b) {
+  if (a == null && b == null) return 0;
+  if (a == null) return -1;
+  if (b == null) return 1;
+  return a - b;
+}
+
+function compareAddedAtAsc(a, b) {
+  const aMs = Date.parse(String(a?.added_at || '')) || 0;
+  const bMs = Date.parse(String(b?.added_at || '')) || 0;
+  return aMs - bMs;
+}
+
+function sortCarsByQuery(cars, sort) {
+  if (!sort) return cars;
+
+  cars.sort((a, b) => {
+    if (sort === 'id_asc') return compareNullableNumbers(numericOrNull(a?.id), numericOrNull(b?.id));
+    if (sort === 'id_desc') return compareNullableNumbers(numericOrNull(b?.id), numericOrNull(a?.id));
+    if (sort === 'price_asc') return compareNullableNumbers(numericOrNull(a?.price), numericOrNull(b?.price));
+    if (sort === 'price_desc') return compareNullableNumbers(numericOrNull(b?.price), numericOrNull(a?.price));
+    if (sort === 'year_asc') return compareNullableNumbers(numericOrNull(a?.year), numericOrNull(b?.year));
+    if (sort === 'year_desc') return compareNullableNumbers(numericOrNull(b?.year), numericOrNull(a?.year));
+    if (sort === 'added_at_asc') return compareAddedAtAsc(a, b);
+    if (sort === 'added_at_desc') return compareAddedAtAsc(b, a);
+    return 0;
+  });
+
+  return cars;
+}
+
 /* ===========================
    Public API used by routes
    =========================== */
@@ -413,7 +720,44 @@ export async function readCars(env) {
   return cars;
 }
 
+export async function readCarsWithQuery(env, rawQuery = {}) {
+  const query = parseCarsQuery(rawQuery);
+  const cars = await readCarsNoLock(env);
+  const filtered = filterCarsByQuery(cars, query);
+  const sorted = sortCarsByQuery(filtered, query.sort);
+
+  if (!query.pagination) {
+    return { cars: sorted, pagination: null };
+  }
+
+  const total = sorted.length;
+  const totalPages = Math.max(1, Math.ceil(total / query.pagination.perPage));
+  const page = query.pagination.page;
+  const start = (page - 1) * query.pagination.perPage;
+  const pagedCars = sorted.slice(start, start + query.pagination.perPage);
+
+  return {
+    cars: pagedCars,
+    pagination: {
+      page,
+      per_page: query.pagination.perPage,
+      total,
+      total_pages: totalPages,
+      has_prev: page > 1,
+      has_next: page < totalPages
+    }
+  };
+}
+
 export async function readCarById(env, id) {
+  if (isSqliteDriver(env)) {
+    try {
+      return await readCarByIdSqlite(env, id);
+    } catch (err) {
+      throw makeErr(500, 'CARS_SQLITE_READ_FAILED', 'Failed to read car from sqlite: ' + (err?.message || String(err)));
+    }
+  }
+
   const cars = await readCarsNoLock(env);
   const numId = Number(id);
   return cars.find(c => Number(c?.id) === numId) || null;
@@ -424,6 +768,22 @@ export async function createCar(env, payload) {
   if (errors.length) throw makeErr(400, 'VALIDATION_FAILED', errors.join('; '));
 
   return await withWriteLock(env, async () => {
+    if (isSqliteDriver(env)) {
+      try {
+        const car = {
+          ...payload,
+          id: await getNextCarIdSqlite(env),
+          photos: []
+        };
+
+        car.assets_folder = generateAssetsFolder(car);
+        await createCarSqlite(env, car);
+        return car;
+      } catch (err) {
+        throw makeErr(500, 'CARS_SQLITE_WRITE_FAILED', 'Failed to create car in sqlite: ' + (err?.message || String(err)));
+      }
+    }
+
     const cars = await readCarsNoLock(env);
 
     const car = {
@@ -446,6 +806,24 @@ export async function updateCar(env, id, patch) {
   if (errors.length) throw makeErr(400, 'VALIDATION_FAILED', errors.join('; '));
 
   return await withWriteLock(env, async () => {
+    if (isSqliteDriver(env)) {
+      const numId = Number(id);
+      try {
+        const current = await readCarByIdSqlite(env, numId);
+        if (!current) throw makeErr(404, 'NOT_FOUND', 'Car not found');
+
+        const cleanPatch = stripReadonly(patch);
+        const updated = { ...current, ...cleanPatch };
+
+        await ensureMainPhotoExistsOrThrow(env, updated);
+        await replaceCarSqlite(env, updated);
+        return updated;
+      } catch (err) {
+        if (err?.code === 'NOT_FOUND' || err?.status === 404) throw err;
+        throw makeErr(500, 'CARS_SQLITE_WRITE_FAILED', 'Failed to update car in sqlite: ' + (err?.message || String(err)));
+      }
+    }
+
     const cars = await readCarsNoLock(env);
     const numId = Number(id);
     const idx = cars.findIndex(c => Number(c?.id) === numId);
@@ -465,6 +843,30 @@ export async function updateCar(env, id, patch) {
 
 export async function deleteCar(env, id) {
   return await withWriteLock(env, async () => {
+    if (isSqliteDriver(env)) {
+      const numId = Number(id);
+      let deleted;
+
+      try {
+        deleted = await readCarByIdSqlite(env, numId);
+        if (!deleted) throw makeErr(404, 'NOT_FOUND', 'Car not found');
+
+        const changes = await deleteCarByIdSqlite(env, numId);
+        if (changes === 0) throw makeErr(404, 'NOT_FOUND', 'Car not found');
+      } catch (err) {
+        if (err?.code === 'NOT_FOUND' || err?.status === 404) throw err;
+        throw makeErr(500, 'CARS_SQLITE_WRITE_FAILED', 'Failed to delete car in sqlite: ' + (err?.message || String(err)));
+      }
+
+      const folder = deleted?.assets_folder;
+      if (folder) {
+        const dir = path.resolve(assetsCarsDir(env.DATA_ROOT), folder);
+        await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+      }
+
+      return { ok: true };
+    }
+
     const cars = await readCarsNoLock(env);
     const numId = Number(id);
     const idx = cars.findIndex(c => Number(c?.id) === numId);
@@ -488,6 +890,31 @@ export async function bulkDeleteCars(env, ids) {
   if (!Array.isArray(ids) || ids.length === 0) throw makeErr(400, 'VALIDATION_FAILED', 'ids must be a non-empty array');
 
   return await withWriteLock(env, async () => {
+    if (isSqliteDriver(env)) {
+      const set = new Set(ids.map(x => Number(x)).filter(Number.isFinite));
+      if (set.size === 0) throw makeErr(400, 'VALIDATION_FAILED', 'ids must contain valid numbers');
+
+      const normalizedIds = Array.from(set.values());
+      let toDelete = [];
+      let deleted = 0;
+
+      try {
+        toDelete = await readCarsByIdsSqlite(env, normalizedIds);
+        deleted = await bulkDeleteCarsByIdsSqlite(env, normalizedIds);
+      } catch (err) {
+        throw makeErr(500, 'CARS_SQLITE_WRITE_FAILED', 'Failed to bulk delete cars in sqlite: ' + (err?.message || String(err)));
+      }
+
+      for (const c of toDelete) {
+        const folder = c?.assets_folder;
+        if (!folder) continue;
+        const dir = path.resolve(assetsCarsDir(env.DATA_ROOT), folder);
+        await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+      }
+
+      return { ok: true, deleted };
+    }
+
     const cars = await readCarsNoLock(env);
 
     const set = new Set(ids.map(x => Number(x)).filter(Number.isFinite));
@@ -544,6 +971,36 @@ export async function uploadCarPhotos(env, id, files) {
   if (!Array.isArray(files) || files.length === 0) throw makeErr(400, 'VALIDATION_FAILED', 'files must be a non-empty array');
 
   return await withWriteLock(env, async () => {
+    if (isSqliteDriver(env)) {
+      const numId = Number(id);
+      try {
+        const car = await readCarByIdSqlite(env, numId);
+        if (!car) throw makeErr(404, 'NOT_FOUND', 'Car not found');
+
+        const photos = Array.isArray(car.photos) ? [...car.photos] : [];
+        const dir = await ensureCarAssetsDir(env, car);
+
+        for (const f of files) {
+          const buf = await toWebp(f.buffer);
+          const name = makePhotoName(photos.length + 1);
+          const target = path.resolve(dir, name);
+
+          if (!ensureInsideDir(dir, target)) throw makeErr(400, 'PHOTO_INVALID_NAME', 'Invalid photo name');
+
+          await fs.writeFile(target, buf);
+          photos.push(name);
+        }
+
+        const updated = { ...car, photos };
+        await ensureMainPhotoExistsOrThrow(env, updated);
+        await replaceCarSqlite(env, updated);
+        return updated;
+      } catch (err) {
+        if (err?.status === 400 || err?.status === 404) throw err;
+        throw makeErr(500, 'CARS_SQLITE_WRITE_FAILED', 'Failed to upload photos in sqlite mode: ' + (err?.message || String(err)));
+      }
+    }
+
     const cars = await readCarsNoLock(env);
     const numId = Number(id);
     const idx = cars.findIndex(c => Number(c?.id) === numId);
@@ -578,6 +1035,31 @@ export async function reorderCarPhotos(env, id, photos) {
   if (!Array.isArray(photos)) throw makeErr(400, 'VALIDATION_FAILED', 'photos must be an array');
 
   return await withWriteLock(env, async () => {
+    if (isSqliteDriver(env)) {
+      const numId = Number(id);
+      try {
+        const car = await readCarByIdSqlite(env, numId);
+        if (!car) throw makeErr(404, 'NOT_FOUND', 'Car not found');
+
+        const current = Array.isArray(car.photos) ? car.photos : [];
+
+        const a = [...current].sort();
+        const b = [...photos].sort();
+        if (a.length !== b.length) throw makeErr(400, 'VALIDATION_FAILED', 'photos must include all current photos');
+        for (let i = 0; i < a.length; i++) {
+          if (a[i] !== b[i]) throw makeErr(400, 'VALIDATION_FAILED', 'photos must include all current photos');
+        }
+
+        const updated = { ...car, photos };
+        await ensureMainPhotoExistsOrThrow(env, updated);
+        await replaceCarSqlite(env, updated);
+        return updated;
+      } catch (err) {
+        if (err?.status === 400 || err?.status === 404) throw err;
+        throw makeErr(500, 'CARS_SQLITE_WRITE_FAILED', 'Failed to reorder photos in sqlite mode: ' + (err?.message || String(err)));
+      }
+    }
+
     const cars = await readCarsNoLock(env);
     const numId = Number(id);
     const idx = cars.findIndex(c => Number(c?.id) === numId);
@@ -607,6 +1089,34 @@ export async function deleteCarPhoto(env, id, name) {
   if (typeof name !== 'string' || name.trim().length === 0) throw makeErr(400, 'VALIDATION_FAILED', 'name is required');
 
   return await withWriteLock(env, async () => {
+    if (isSqliteDriver(env)) {
+      const numId = Number(id);
+      try {
+        const car = await readCarByIdSqlite(env, numId);
+        if (!car) throw makeErr(404, 'NOT_FOUND', 'Car not found');
+
+        const current = Array.isArray(car.photos) ? [...car.photos] : [];
+        const pos = current.indexOf(name);
+        if (pos < 0) throw makeErr(404, 'NOT_FOUND', 'Photo not found');
+
+        const dir = path.resolve(assetsCarsDir(env.DATA_ROOT), car.assets_folder);
+        const full = path.resolve(dir, name);
+
+        if (!ensureInsideDir(dir, full)) throw makeErr(400, 'PHOTO_INVALID_NAME', 'Invalid photo name');
+
+        await fs.unlink(full).catch(() => {});
+        current.splice(pos, 1);
+
+        const updated = { ...car, photos: current };
+        await ensureMainPhotoExistsOrThrow(env, updated);
+        await replaceCarSqlite(env, updated);
+        return updated;
+      } catch (err) {
+        if (err?.status === 400 || err?.status === 404) throw err;
+        throw makeErr(500, 'CARS_SQLITE_WRITE_FAILED', 'Failed to delete photo in sqlite mode: ' + (err?.message || String(err)));
+      }
+    }
+
     const cars = await readCarsNoLock(env);
     const numId = Number(id);
     const idx = cars.findIndex(c => Number(c?.id) === numId);
