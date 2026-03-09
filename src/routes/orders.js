@@ -22,11 +22,11 @@ async function sendTelegramNotification(runtimeEnv, order) {
   if (!token || !chatId) return;
 
   const text = [
-    'New site order',
-    `Name: ${order.name}`,
-    `Phone: ${order.phone}`,
-    order.message ? `Message: ${order.message}` : null,
-    `Time: ${formatLocalTime(order.created_at)}`
+    '📋 Новая заявка с сайта',
+    `👤 Имя: ${order.name}`,
+    `📞 Телефон: ${order.phone}`,
+    order.message ? `💬 Описание: ${order.message}` : null,
+    `🕒 Время: ${formatLocalTime(order.created_at)}`
   ].filter(Boolean).join('\n');
 
   try {
