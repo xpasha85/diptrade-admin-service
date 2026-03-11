@@ -8,6 +8,7 @@ assets/
 .env
 .env.local
 .env.*.local
+.env.production_admintoken
 
 # IDE/OS
 .vscode/

@@ -693,10 +693,17 @@ function compareAddedAtAsc(a, b) {
   return aMs - bMs;
 }
 
+function compareInStockFirst(a, b) {
+  return Number(Boolean(b?.in_stock)) - Number(Boolean(a?.in_stock));
+}
+
 function sortCarsByQuery(cars, sort) {
   if (!sort) return cars;
 
   cars.sort((a, b) => {
+    const stockDiff = compareInStockFirst(a, b);
+    if (stockDiff !== 0) return stockDiff;
+
     if (sort === 'id_asc') return compareNullableNumbers(numericOrNull(a?.id), numericOrNull(b?.id));
     if (sort === 'id_desc') return compareNullableNumbers(numericOrNull(b?.id), numericOrNull(a?.id));
     if (sort === 'price_asc') return compareNullableNumbers(numericOrNull(a?.price), numericOrNull(b?.price));
