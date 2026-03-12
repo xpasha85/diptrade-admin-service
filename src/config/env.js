@@ -19,6 +19,33 @@ function stripWrappingQuotes(value) {
   return value;
 }
 
+function stripInlineComment(value) {
+  let inSingle = false;
+  let inDouble = false;
+
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i];
+
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+
+    if (ch === '#' && !inSingle && !inDouble) {
+      if (i === 0 || /\s/.test(value[i - 1])) {
+        return value.slice(0, i).trimEnd();
+      }
+    }
+  }
+
+  return value;
+}
+
 function parseEnvFile(content) {
   const parsed = {};
   const lines = content.split(/\r?\n/);
@@ -38,7 +65,7 @@ function parseEnvFile(content) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
 
     const rawValue = normalized.slice(eqIdx + 1).trim();
-    parsed[key] = stripWrappingQuotes(rawValue);
+    parsed[key] = stripWrappingQuotes(stripInlineComment(rawValue));
   }
 
   return parsed;
@@ -115,9 +142,20 @@ export function loadEnv() {
   const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
   const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
   const TELEGRAM_CHAT_ID = (process.env.TELEGRAM_CHAT_ID || '').trim();
+  const TELEGRAM_MESSAGE_THREAD_ID_RAW = (process.env.TELEGRAM_MESSAGE_THREAD_ID || '').trim();
+  const TELEGRAM_MESSAGE_THREAD_ID = TELEGRAM_MESSAGE_THREAD_ID_RAW
+    ? Number(TELEGRAM_MESSAGE_THREAD_ID_RAW)
+    : null;
 
   if (!ADMIN_TOKEN) {
     throw new Error('ADMIN_TOKEN must not be empty');
+  }
+
+  if (
+    TELEGRAM_MESSAGE_THREAD_ID_RAW &&
+    (!Number.isInteger(TELEGRAM_MESSAGE_THREAD_ID) || TELEGRAM_MESSAGE_THREAD_ID <= 0)
+  ) {
+    throw new Error('TELEGRAM_MESSAGE_THREAD_ID must be a positive integer');
   }
 
   return {
@@ -130,6 +168,7 @@ export function loadEnv() {
     SQLITE_PATH,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
+    TELEGRAM_MESSAGE_THREAD_ID,
     ENV_FILE: loadedEnvFile
   };
 }

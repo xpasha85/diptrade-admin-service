@@ -18,6 +18,7 @@ function formatLocalTime(utcStr) {
 async function sendTelegramNotification(runtimeEnv, order) {
   const token = runtimeEnv.TELEGRAM_BOT_TOKEN;
   const chatId = runtimeEnv.TELEGRAM_CHAT_ID;
+  const messageThreadId = runtimeEnv.TELEGRAM_MESSAGE_THREAD_ID;
 
   if (!token || !chatId) return;
 
@@ -35,6 +36,7 @@ async function sendTelegramNotification(runtimeEnv, order) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: chatId,
+        ...(messageThreadId ? { message_thread_id: messageThreadId } : {}),
         text
       })
     });
